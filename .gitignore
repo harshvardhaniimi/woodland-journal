@@ -1,0 +1,15 @@
+# Harness output, sandboxes and device backups never go into the repository:
+# they hold a reader's library, reading history and Goodreads data.
+out/
+sandbox*/
+backups/
+*.img
+*.sqlite3
+*.sqlite3-*
+**/woodland-goodreads/
+history.lua
+settings.reader.lua
+# macOS and editor noise
+.DS_Store
+._*
+*.swp

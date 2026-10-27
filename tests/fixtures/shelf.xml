@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" >
+  <channel>
+    <title>Test Reader's bookshelf: to-read</title>
+    <link><![CDATA[https://www.goodreads.com/review/list_rss/12345678?shelf=to-read&per_page=200]]></link>
+    <description><![CDATA[Test Reader's bookshelf: to-read]]></description>
+    <language>en-US</language>
+  <item>
+    <guid><![CDATA[https://www.goodreads.com/review/show/1]]></guid>
+    <title><![CDATA[Walden; or, Life in the Woods]]></title>
+    <link><![CDATA[https://www.goodreads.com/review/show/1]]></link>
+    <book_id>16902</book_id>
+    <book_medium_image_url><![CDATA[https://i.gr-assets.com/images/medium/16902.jpg]]></book_medium_image_url>
+    <book_large_image_url><![CDATA[https://i.gr-assets.com/images/large/16902.jpg]]></book_large_image_url>
+    <book_description><![CDATA[<b>An account of two years by a pond.</b>In 1845 the author built a cabin<br /><br />and lived &quot;deliberately&quot; &amp; simply &#8212; a record of seasons, work &#x26; solitude.<p>A second paragraph.</p>]]></book_description>
+    <book id="16902">
+      <num_pages>352</num_pages>
+    </book>
+    <author_name>Henry David Thoreau</author_name>
+    <isbn>0451532163</isbn>
+    <user_name>Test Reader</user_name>
+    <user_rating>0</user_rating>
+    <user_read_at></user_read_at>
+    <user_date_added><![CDATA[Wed, 14 Oct 2026 08:10:00 -0700]]></user_date_added>
+    <user_shelves>to-read</user_shelves>
+    <user_review></user_review>
+    <average_rating>3.81</average_rating>
+    <book_published>1854</book_published>
+  </item>
+  <item>
+    <guid><![CDATA[https://www.goodreads.com/review/show/2]]></guid>
+    <title><![CDATA[Middlemarch: A Study of Provincial Life (Penguin Classics, Revised and Expanded Edition with Notes)]]></title>
+    <link><![CDATA[https://www.goodreads.com/review/show/2]]></link>
+    <book_id>19089</book_id>
+    <book_medium_image_url><![CDATA[https://i.gr-assets.com/images/medium/19089.jpg]]></book_medium_image_url>
+    <book_large_image_url><![CDATA[]]></book_large_image_url>
+    <book_description><![CDATA[]]></book_description>
+    <book id="19089">
+      <num_pages></num_pages>
+    </book>
+    <author_name>George Eliot</author_name>
+    <isbn></isbn>
+    <user_name>Test Reader</user_name>
+    <user_rating>5</user_rating>
+    <user_read_at><![CDATA[Sat, 03 Jan 2026 10:00:00 -0800]]></user_read_at>
+    <user_date_added><![CDATA[Mon, 01 Dec 2025 10:00:00 -0800]]></user_date_added>
+    <user_shelves>to-read</user_shelves>
+    <user_review><![CDATA[Slow to start, <i>then</i> impossible to put down.<br/>Dorothea's choices stay with you.]]></user_review>
+    <average_rating>4.01</average_rating>
+    <book_published>1871</book_published>
+  </item>
+  <item>
+    <guid><![CDATA[https://www.goodreads.com/review/show/3]]></guid>
+    <title><![CDATA[नमक का दरोगा]]></title>
+    <link><![CDATA[https://www.goodreads.com/review/show/3]]></link>
+    <book_id>abc</book_id>
+    <author_name>Ignored, because the id is not a number</author_name>
+  </item>
+  <item>
+    <guid><![CDATA[https://www.goodreads.com/review/show/4]]></guid>
+    <title><![CDATA[गोदान]]></title>
+    <link><![CDATA[https://www.goodreads.com/review/show/4]]></link>
+    <book_id>1043470</book_id>
+    <book_large_image_url><![CDATA[https://i.gr-assets.com/images/large/1043470.jpg]]></book_large_image_url>
+    <book_description><![CDATA[होरी और धनिया की कथा।]]></book_description>
+    <book id="1043470">
+      <num_pages>330</num_pages>
+    </book>
+    <author_name>Munshi Premchand</author_name>
+    <user_rating>0</user_rating>
+    <average_rating>4.12</average_rating>
+    <book_published>1936</book_published>
+  </item>
+  </channel>
+</rss>
