@@ -25,12 +25,13 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-TOOL_VERSION = "0.2.0"
+TOOL_VERSION = "0.2.1"
 REPO = Path(__file__).resolve().parent
 PLUGIN_SRC = REPO / "woodland.koplugin"
 FONTS_SRC = REPO / "fonts" / "alegreya"
@@ -114,18 +115,23 @@ def sha256(path):
 
 def copy_verified(src, dst):
     """Copy the bytes of src to dst (no metadata, so macOS adds as little as
-    possible), flush them to the device, and compare checksums. Returns the hash."""
+    possible) through a temporary file, flush them, read them back and compare
+    checksums, then put the file in place. Returns the hash."""
+    if os.path.lexists(dst) and (dst.is_symlink() or not dst.is_file()):
+        raise Stop(f"Not overwriting {dst}: it is not an ordinary file.")
     dst.parent.mkdir(parents=True, exist_ok=True)
+    part = dst.with_name(dst.name + ".woodland-part")
     h = hashlib.sha256()
-    with open(src, "rb") as fin, open(dst, "wb") as fout:
+    with open(src, "rb") as fin, open(part, "wb") as fout:
         for block in iter(lambda: fin.read(CHUNK), b""):
             h.update(block)
             fout.write(block)
         fout.flush()
         os.fsync(fout.fileno())
     digest = h.hexdigest()
-    if sha256(dst) != digest:
-        raise Stop(f"Copy check failed for {dst}: the written file differs from {src}. Stop and check the Kobo's storage.")
+    if sha256(part) != digest:
+        raise Stop(f"Copy check failed for {dst}: the written file differs from {src}. Stop and check the storage.")
+    os.replace(part, dst)
     return digest
 
 
@@ -142,12 +148,37 @@ def appledouble(root):
     return sorted(p for p in root.rglob("._*") if p.is_file()) if root.exists() else []
 
 
+def inside(path, root):
+    """Whether path, with links and '..' resolved, is root or lies under it."""
+    path, root = os.path.realpath(path), os.path.realpath(root)
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
+def safe_relative(entry):
+    """A path from INSTALL.json (which lives on the Kobo and is not trusted) as
+    a relative Path, or None: forward slashes, no '..', '.', empty parts,
+    drive letters, backslashes or control characters."""
+    if not isinstance(entry, str) or not entry or len(entry) > 300:
+        return None
+    if entry.startswith("/") or "\\" in entry or ":" in entry or any(ord(c) < 32 for c in entry):
+        return None
+    parts = entry.rstrip("/").split("/")
+    if any(p in ("", ".", "..") for p in parts):
+        return None
+    return Path(*parts)
+
+
 def move_off_kobo(path, kobo, keep_root):
     """Copy a file or folder from the Kobo into keep_root (same relative path),
-    verify every file, then remove it from the Kobo."""
-    rel = path.relative_to(kobo)
+    verify every file, then remove it from the Kobo. Refuses anything outside
+    the Kobo, any destination outside keep_root, and links."""
+    if path.is_symlink() or not inside(path, kobo) or os.path.realpath(path) == os.path.realpath(kobo):
+        raise Stop(f"Refusing to move {path}: it is not a file or folder inside the Kobo.")
+    rel = Path(os.path.relpath(os.path.realpath(path), os.path.realpath(kobo)))
     target = keep_root / rel
-    files = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file())
+    if not inside(target, keep_root) or inside(keep_root, kobo):
+        raise Stop(f"Refusing to move {path} to {target}: the backup folder must be on this computer, not on the Kobo.")
+    files = [path] if path.is_file() else sorted(p for p in path.rglob("*") if p.is_file() and not p.is_symlink())
     for f in files:
         copy_verified(f, target / f.relative_to(path) if path.is_dir() else target)
     if path.is_dir():
@@ -203,17 +234,26 @@ def find_kobo(given):
     return found[0]
 
 
+def clean(text, limit=60):
+    """Text read from the Kobo, safe to print: letters, digits and a little
+    punctuation only (no escape codes or instructions), and short."""
+    if text is None:
+        return None
+    text = re.sub(r"[^A-Za-z0-9 ._+\-/()]", "?", str(text))[:limit]
+    return text or "unknown"
+
+
 def meta_version(plugin_dir):
     meta = plugin_dir / "_meta.lua"
     if not meta.is_file():
         return None
     match = re.search(r'version\s*=\s*"([^"]+)"', meta.read_text(encoding="utf-8", errors="replace"))
-    return match.group(1) if match else "unknown"
+    return clean(match.group(1), 20) if match else "unknown"
 
 
 def read_first_line(path):
     try:
-        return path.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip()
+        return clean(path.read_text(encoding="utf-8", errors="replace").splitlines()[0].strip(), 200)
     except (OSError, IndexError):
         return None
 
@@ -221,10 +261,14 @@ def read_first_line(path):
 def device_info(kobo):
     info = {"kobo": str(kobo)}
     # .kobo/version starts with the device's serial number: only firmware and model are read.
-    fields = (read_first_line(kobo / ".kobo" / "version") or "").split(",")
-    info["firmware"] = fields[2] if len(fields) > 2 else None
-    info["model_code"] = fields[-1] if len(fields) > 3 else None
-    info["koreader"] = read_first_line(kobo / KOREADER / "git-rev") if (kobo / KOREADER).is_dir() else None
+    try:
+        line = (kobo / ".kobo" / "version").read_text(encoding="utf-8", errors="replace").splitlines()[0]
+    except (OSError, IndexError):
+        line = ""
+    fields = line.split(",")
+    info["firmware"] = clean(fields[2], 20) if len(fields) > 2 else None
+    info["model_code"] = clean(fields[-1], 40) if len(fields) > 3 else None
+    info["koreader"] = clean(read_first_line(kobo / KOREADER / "git-rev"), 40) if (kobo / KOREADER).is_dir() else None
     info["simpleui"] = meta_version(kobo / PLUGINS / "simpleui.koplugin")
     info["simpleui_extra"] = meta_version(kobo / PLUGINS / "simpleui_ext.koplugin")
     info["woodland"] = meta_version(kobo / PLUGIN_DEST)
@@ -236,11 +280,12 @@ def device_info(kobo):
             hits = sorted(folder.rglob(name)) if folder.is_dir() else []
             hits = [h for h in hits if not h.name.startswith("._")]
             if hits:
-                fonts[name] = str(hits[0].relative_to(kobo))
+                fonts[name] = clean(hits[0].relative_to(kobo).as_posix(), 120)
                 break
     info["fonts"] = fonts
     dicts = kobo / DICT_DEST
     info["dictionaries"] = sorted(p.name for p in dicts.iterdir() if p.is_dir()) if dicts.is_dir() else []
+    info["dictionaries_shown"] = [clean(d, 40) for d in info["dictionaries"]]
     usage = shutil.disk_usage(kobo)
     info["free_mb"] = usage.free // (1024 * 1024)
     return info
@@ -252,12 +297,12 @@ def fsck_command(kobo):
     try:
         if system == "Darwin":
             out = subprocess.run(["diskutil", "info", str(kobo)], capture_output=True, text=True, timeout=20).stdout
-            node = re.search(r"Device Node:\s+(/dev/disk\S+)", out)
+            node = re.search(r"Device Node:\s+/dev/disk(\d+(?:s\d+)?)\s", out)
             if node:
-                return "sudo fsck_msdos -n " + node.group(1).replace("/dev/disk", "/dev/rdisk")
+                return "sudo fsck_msdos -n /dev/rdisk" + node.group(1)
         elif system == "Linux":
             out = subprocess.run(["findmnt", "-n", "-o", "SOURCE", str(kobo)], capture_output=True, text=True, timeout=20).stdout.strip()
-            if out:
+            if re.fullmatch(r"/dev/[A-Za-z0-9/_-]+", out):
                 return f"sudo fsck.fat -n {out}"
         elif system == "Windows":
             return f"chkdsk {str(kobo)[:2]}"
@@ -269,10 +314,10 @@ def fsck_command(kobo):
 def eject_hint(kobo):
     system = platform.system()
     if system == "Darwin":
-        return f'diskutil eject "{kobo}"   (or drag it to the Trash in Finder)'
+        return f"diskutil eject {shlex.quote(str(kobo))}   (or drag it to the Trash in Finder)"
     if system == "Windows":
         return "Safely Remove Hardware in the taskbar, then tap Eject on the Kobo if asked"
-    return f'udisksctl unmount -b "$(findmnt -n -o SOURCE "{kobo}")"   (or Eject in your file manager)'
+    return f'udisksctl unmount -b "$(findmnt -n -o SOURCE {shlex.quote(str(kobo))})"   (or Eject in your file manager)'
 
 
 def available_dictionaries():
@@ -292,7 +337,7 @@ def report(info):
     log("Woodland Journal:", info["woodland"] or "not installed",
         "(0.1 inside SimpleUI Extra: " + ", ".join(info["legacy"]) + ")" if info["legacy"] else "")
     log("Alegreya fonts:  ", ", ".join(f"{k} in {v}" for k, v in info["fonts"].items()) or "missing (headings fall back to Noto Serif)")
-    log("Dictionaries:    ", ", ".join(info["dictionaries"]) or "none added")
+    log("Dictionaries:    ", ", ".join(info["dictionaries_shown"]) or "none added")
     log("Free space:      ", f"{info['free_mb']} MB")
     log("Tested by the author on one Kobo Libra Colour (firmware 4.45.23792, KOReader v2026.07.1, SimpleUI 2.7.5).")
     log("Other devices and versions are untested: keep a backup.")
@@ -341,36 +386,48 @@ def cmd_check(args):
 # ── backup ──────────────────────────────────────────────────────────────────
 
 def backup_files(kobo, scope):
+    """Files and folders (empty ones too) to back up. The computer's own index
+    folders are skipped at the top of the Kobo only."""
     if scope == "koreader":
         roots = [kobo / KOREADER, kobo / ".kobo" / "Kobo" / "Kobo eReader.conf"]
     else:
         roots = [kobo]
-    files = []
+    files, folders = [], []
     for root in roots:
         if root.is_file():
             files.append(root)
             continue
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_IN_BACKUP)
+            top = Path(dirpath) == kobo
+            dirnames[:] = sorted(d for d in dirnames if not (top and d in SKIP_IN_BACKUP))
+            folders.append(Path(dirpath))
             for name in sorted(filenames):
-                files.append(Path(dirpath) / name)
-    return files
+                path = Path(dirpath) / name
+                if not path.is_symlink():
+                    files.append(path)
+    return files, folders
 
 
 def cmd_backup(args, info=None):
     kobo = find_kobo(args.kobo)
     info = info or device_info(kobo)
-    files = backup_files(kobo, args.scope)
+    files, folders = backup_files(kobo, args.scope)
     total = sum(f.stat().st_size for f in files)
     stamp = datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S")
     dest = Path(args.to).expanduser() if getattr(args, "to", None) else BACKUP_ROOT / stamp
-    root = dest / "kobo"
+    if inside(dest, kobo):
+        raise Stop("The backup must go to this computer, not onto the Kobo.")
     dest.parent.mkdir(parents=True, exist_ok=True)
     free = shutil.disk_usage(dest.parent).free
     if free < total * 1.05 + 50 * CHUNK:
         raise Stop(f"Not enough space for the backup: it needs {total // CHUNK} MB, {free // CHUNK} MB are free at {dest.parent}.")
+    if not getattr(args, "to", None):
+        dest = new_folder(dest)   # two backups in the same second get -2, -3 …
+    root = dest / "kobo"
     root.mkdir(parents=True, exist_ok=False)
     log(f"Backing up {len(files)} files ({total // CHUNK} MB) from {kobo} to {dest} …")
+    for folder in folders:
+        (root / folder.relative_to(kobo)).mkdir(parents=True, exist_ok=True)
     sums, done = [], 0
     for i, f in enumerate(files, 1):
         rel = f.relative_to(kobo)
@@ -385,18 +442,89 @@ def cmd_backup(args, info=None):
               "device": {k: info[k] for k in ("firmware", "model_code", "koreader", "simpleui", "simpleui_extra", "woodland")}}
     (dest / "backup.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     log(f"Backup complete and checked: {dest}")
-    log("To restore it, copy the contents of its kobo/ folder back onto the Kobo.")
+    log("To get a file back, copy it from the backup's kobo/ folder. Never copy kobo/.kobo/ back as a whole:")
+    log("it holds the Kobo's own database, and an older copy makes the Kobo reset itself and can delete books.")
     return dest
 
 
-def existing_backup(path):
+def existing_backup(path, info=None):
     dest = Path(path).expanduser()
-    if not (dest / "backup.json").is_file() or not (dest / "kobo").is_dir():
+    try:
+        record = json.loads((dest / "backup.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = None
+    if not isinstance(record, dict) or not (dest / "kobo").is_dir():
         raise Stop(f"{dest} is not a backup made by this installer (no backup.json and kobo/ folder).")
+    if info and inside(dest, info["kobo"]):
+        raise Stop(f"{dest} is on the Kobo; backups are kept on this computer.")
+    device = record.get("device") if isinstance(record.get("device"), dict) else {}
+    if info and device.get("model_code") and info.get("model_code") and device["model_code"] != info["model_code"]:
+        raise Stop(f"{dest} is a backup of a different Kobo model; make a new backup instead.")
     return dest
+
+
+def new_folder(base):
+    """base, or base-2, base-3 … when it already exists; created."""
+    for n in range(1, 1000):
+        folder = base if n == 1 else base.with_name(f"{base.name}-{n}")
+        try:
+            folder.mkdir(parents=True)
+            return folder
+        except FileExistsError:
+            continue
+    raise Stop(f"Could not create a new folder next to {base}.")
 
 
 # ── install ─────────────────────────────────────────────────────────────────
+
+BACKUP_NAME = re.compile(r"\d{4}-\d{2}-\d{2}_\d{6}(-\d+)?")
+
+
+def read_manifest(dest):
+    """The INSTALL.json an earlier install left on the Kobo. It lives on the
+    device, so it is not trusted: only entries that can name nothing but
+    Woodland's own files are kept, and the rest is ignored with a note."""
+    path = dest / MANIFEST
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        log("  Note: the earlier INSTALL.json could not be read; it is ignored.")
+        return {}
+
+    def entries(key):
+        value = data.get(key)
+        return value if isinstance(value, list) else []
+
+    ignored = 0
+    plugin_files = []
+    for entry in entries("plugin_files"):
+        rel = safe_relative(entry)
+        if rel and inside(dest / rel, dest):
+            plugin_files.append(rel.as_posix())
+        else:
+            ignored += 1
+    fonts = {(FONTS_DEST / name).as_posix() for name in FONT_FILES}
+    extra_files = []
+    for entry in entries("extra_files"):
+        rel = safe_relative(entry)
+        if rel and (rel.as_posix() in fonts or (rel.parent == DICT_DEST and entry.endswith("/"))):
+            extra_files.append(rel.as_posix() + ("/" if entry.endswith("/") else ""))
+        else:
+            ignored += 1
+    legacy_moved = [e for e in entries("legacy_moved") if e in LEGACY]
+    ignored += len(entries("legacy_moved")) - len(legacy_moved)
+    # Only the name of a folder in ~/KoboBackups (older installs stored the whole path).
+    backup = data.get("backup")
+    name = Path(backup).name if isinstance(backup, str) else ""
+    if ignored:
+        log(f"  Note: {ignored} unexpected entries in the earlier INSTALL.json were ignored.")
+    return {"plugin_files": plugin_files, "extra_files": extra_files, "legacy_moved": legacy_moved,
+            "backup": name if BACKUP_NAME.fullmatch(name) else None}
+
 
 def answer_mode(args):
     if args.yes:
@@ -424,17 +552,19 @@ def cmd_install(args):
 
     # The backup comes first; nothing is written to the Kobo before it is complete.
     if args.backup:
-        backup = existing_backup(args.backup)
+        backup = existing_backup(args.backup, info)
         log("Using the earlier backup", backup)
     elif args.no_backup:
-        if not ask("Install without making a backup first (you have your own)?", False, True if args.yes else None, mode):
-            raise Stop("Stopped before installing: make a backup first.")
+        # Only a person at the prompt can skip the backup; --yes never does.
+        if mode != "prompt" or not ask("Install without making a backup first (you have your own)?", False):
+            raise Stop("Stopped before installing: make a backup first (skipping it must be confirmed at the prompt).")
         backup = BACKUP_ROOT / (datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S") + "-install")
     else:
         args.scope = args.backup_scope
         backup = cmd_backup(args, info)
-    run = backup / "install-run"
-    run.mkdir(parents=True, exist_ok=True)
+    if inside(backup, kobo):
+        raise Stop("The backup folder must be on this computer, not on the Kobo.")
+    run = new_folder(backup / "install-run")
     log.to_file(run / "install-log.txt")
 
     missing_fonts = [f for f in FONT_FILES if f not in info["fonts"]]
@@ -447,7 +577,10 @@ def cmd_install(args):
     if args.dictionary:
         if args.dictionary not in dictionaries:
             raise Stop(f"No bundled dictionary named {args.dictionary}; available: {', '.join(dictionaries) or 'none'}.")
-        dictionary = args.dictionary
+        if args.dictionary in info["dictionaries"]:
+            log(f"The dictionary {args.dictionary} is already on the Kobo; it is left as it is.")
+        else:
+            dictionary = args.dictionary
     elif dictionaries and mode == "prompt":
         for name in dictionaries:
             if name not in info["dictionaries"] and ask(f"Add the dictionary {name}? Your current dictionaries stay as they are.", False):
@@ -467,12 +600,7 @@ def cmd_install(args):
         raise Stop("Stopped before installing. The backup is kept; nothing on the Kobo was changed.")
 
     dest = kobo / PLUGIN_DEST
-    previous = {}
-    if (dest / MANIFEST).is_file():
-        try:
-            previous = json.loads((dest / MANIFEST).read_text(encoding="utf-8"))
-        except ValueError:
-            previous = {}
+    previous = read_manifest(dest)
     written = {}
     # 1. The plugin. Files a previous install put there and this version no longer has are moved off.
     sources = source_files(PLUGIN_SRC)
@@ -506,9 +634,17 @@ def cmd_install(args):
         for rel in info["legacy"]:
             move_off_kobo(extra / rel, kobo, run / "removed-from-kobo")
         log("  Woodland Journal 0.1: moved to", run / "removed-from-kobo")
-    # 5. Record what was installed.
+    # 5. Record what was installed. The backup named is the one holding
+    # Woodland Journal 0.1, for --restore-legacy: this one when this run moved
+    # it, otherwise the one an earlier install recorded.
+    if migrate or not previous.get("legacy_moved"):
+        backup_name = backup.name if inside(backup, BACKUP_ROOT) and BACKUP_NAME.fullmatch(backup.name) else None
+    else:
+        backup_name = previous.get("backup")
     manifest = {"version": meta_version(PLUGIN_SRC), "installed": datetime.datetime.now().isoformat(timespec="seconds"),
-                "tool_version": TOOL_VERSION, "backup": str(backup),
+                "tool_version": TOOL_VERSION,
+                # The folder's name in ~/KoboBackups only: no paths or user names on the Kobo.
+                "backup": backup_name,
                 "plugin_files": sorted(current), "extra_files": sorted(set(extras)),
                 "legacy_moved": info["legacy"] if migrate else previous.get("legacy_moved", [])}
     (dest / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
@@ -516,8 +652,11 @@ def cmd_install(args):
     # 6. macOS metadata files beside everything written (last, so none follow).
     sync()
     swept = []
-    for folder in [dest, kobo / FONTS_DEST] + ([kobo / DICT_DEST / dictionary] if dictionary else []):
-        for junk in appledouble(folder):
+    folders = [dest, kobo / FONTS_DEST] + ([kobo / DICT_DEST / dictionary] if dictionary else [])
+    for folder in folders:
+        # Inside each folder, and the one macOS puts beside the folder itself.
+        beside = folder.with_name("._" + folder.name)
+        for junk in appledouble(folder) + ([beside] if beside.is_file() else []):
             swept.append(move_off_kobo(junk, kobo, run / "appledouble"))
     if swept:
         log(f"  moved {len(swept)} macOS '._' metadata files off the Kobo")
@@ -542,23 +681,47 @@ def cmd_install(args):
 def cmd_uninstall(args):
     mode = answer_mode(args)
     kobo = find_kobo(args.kobo)
+    info = device_info(kobo)
     dest = kobo / PLUGIN_DEST
-    if not dest.is_dir():
+    if not dest.is_dir() or dest.is_symlink():
         raise Stop("Woodland Journal is not installed on this Kobo.")
-    manifest = {}
-    if (dest / MANIFEST).is_file():
-        try:
-            manifest = json.loads((dest / MANIFEST).read_text(encoding="utf-8"))
-        except ValueError:
-            pass
-    log("On the Kobo, Tools → Woodland Journal → Remove from home screen takes its pages out of SimpleUI first;")
-    log("otherwise SimpleUI may show an empty page where the dashboard was.")
-    if not ask("Have you done that (or do you not mind an empty page)?", True, None, mode):
-        raise Stop("Stopped. Nothing was changed.")
-    keep = BACKUP_ROOT / (datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S") + "-uninstall")
-    keep.mkdir(parents=True)
+    manifest = read_manifest(dest)
+    command = fsck_command(kobo)
+    log("Before anything is moved, check the Kobo's filesystem without changing it:")
+    log("  ", command or "(run your system's read-only FAT check on the Kobo)")
+    if not ask("Did that check finish with nothing worse than the volume being marked dirty?", False,
+               True if args.fsck_ok else None, "fail" if mode == "default" else mode):
+        raise Stop("Stopped: fix or investigate the filesystem first. Nothing was changed.")
+    # Where Woodland Journal 0.1 would come back from, checked before anything moves.
+    extension = kobo / PLUGINS / "simpleui_ext.koplugin"
+    legacy, source = manifest.get("legacy_moved", []), None
+    if args.restore_legacy:
+        if not legacy:
+            raise Stop("This install did not move Woodland Journal 0.1, so there is nothing to put back.")
+        if args.backup:
+            backup = existing_backup(args.backup, info)
+        elif manifest.get("backup"):
+            backup = existing_backup(BACKUP_ROOT / manifest["backup"], info)
+        else:
+            raise Stop("Pass --backup with the backup made before Woodland Journal 0.2 was installed.")
+        source = backup / "kobo" / PLUGINS / "simpleui_ext.koplugin"
+        missing = [rel for rel in legacy if not (source / rel).exists() or not inside(source / rel, source)]
+        if missing:
+            raise Stop(f"{backup} does not hold Woodland Journal 0.1 ({', '.join(missing)} missing).")
+        present = [rel for rel in legacy if os.path.lexists(extension / rel)]
+        if present:
+            raise Stop("Woodland Journal 0.1 is already in SimpleUI Extra (" + ", ".join(present) + "); nothing was changed.")
+    else:
+        log("On the Kobo, Tools → Woodland Journal → Remove from home screen takes its pages out of SimpleUI first;")
+        log("otherwise SimpleUI may show an empty page where the dashboard was.")
+        if not ask("Have you done that (or do you not mind an empty page)?", True, None, mode):
+            raise Stop("Stopped. Nothing was changed.")
+    keep = new_folder(BACKUP_ROOT / (datetime.datetime.now().strftime("%Y-%m-%d_%H%M%S") + "-uninstall"))
     log.to_file(keep / "uninstall-log.txt")
     move_off_kobo(dest, kobo, keep)
+    beside = dest.with_name("._" + dest.name)
+    if beside.is_file():
+        move_off_kobo(beside, kobo, keep)
     log("Moved", PLUGIN_DEST.as_posix(), "to", keep)
     extras = [e for e in manifest.get("extra_files", []) if (kobo / e.rstrip("/")).exists()]
     if extras and ask("Also move the fonts and dictionary Woodland added (" + ", ".join(extras) + ")? "
@@ -566,18 +729,18 @@ def cmd_uninstall(args):
         for e in extras:
             move_off_kobo(kobo / e.rstrip("/"), kobo, keep)
             log("Moved", e, "to", keep)
-    legacy = manifest.get("legacy_moved", [])
-    if legacy and args.restore_legacy:
-        source = Path(manifest.get("backup", "")) / "kobo" / PLUGINS / "simpleui_ext.koplugin"
+    if source:
         for rel in legacy:
             src = source / rel
-            files = [src] if src.is_file() else sorted(p for p in src.rglob("*") if p.is_file())
+            files = [src] if src.is_file() else sorted(p for p in src.rglob("*") if p.is_file() and not p.is_symlink())
             for f in files:
-                target = kobo / PLUGINS / "simpleui_ext.koplugin" / rel
-                copy_verified(f, target / f.relative_to(src) if src.is_dir() else target)
+                if not inside(f, source):
+                    raise Stop(f"Refusing to copy {f}: it is outside the backup.")
+                copy_verified(f, extension / rel / f.relative_to(src) if src.is_dir() else extension / rel)
         log("Put Woodland Journal 0.1 back into SimpleUI Extra from", source)
     sync()
     log("Done. Woodland's settings stay in KOReader's settings (simpleui_woodland_*) and are harmless.")
+    log("Check the filesystem again, read-only:", command or "(your system's read-only FAT check)")
     log("Eject the Kobo:", eject_hint(kobo))
     return 0
 
@@ -603,7 +766,7 @@ def main(argv=None):
     p.add_argument("--fsck-ok", action="store_true", help="the reader ran the read-only filesystem check and it was clean")
     p.add_argument("--backup", help="use this earlier backup instead of making a new one")
     p.add_argument("--backup-scope", choices=["all", "koreader"], default="all", help="what a new backup copies (default: all)")
-    p.add_argument("--no-backup", action="store_true", help="skip the backup (the reader has their own)")
+    p.add_argument("--no-backup", action="store_true", help="skip the backup; must be confirmed at the prompt")
     p.add_argument("--fonts", dest="fonts", action="store_true", default=None, help="add missing Alegreya fonts")
     p.add_argument("--no-fonts", dest="fonts", action="store_false", help="do not add fonts")
     p.add_argument("--migrate", dest="migrate", action="store_true", default=None,
@@ -613,10 +776,12 @@ def main(argv=None):
     p.add_argument("--yes", action="store_true", help="answer the remaining questions with their defaults (for agents)")
     p = sub.add_parser("uninstall", help="move Woodland Journal off the Kobo")
     kobo_arg(p)
+    p.add_argument("--fsck-ok", action="store_true", help="the reader ran the read-only filesystem check and it was clean")
     p.add_argument("--remove-extras", dest="remove_extras", action="store_true", default=None,
                    help="also move the fonts and dictionary Woodland added")
     p.add_argument("--keep-extras", dest="remove_extras", action="store_false", help="keep them (default)")
     p.add_argument("--restore-legacy", action="store_true", help="put Woodland Journal 0.1 back into SimpleUI Extra")
+    p.add_argument("--backup", help="the backup to restore Woodland Journal 0.1 from (default: the one made at install)")
     p.add_argument("--yes", action="store_true", help="do not ask (for agents)")
     args = parser.parse_args(argv)
     try:
@@ -629,6 +794,10 @@ def main(argv=None):
     except KeyboardInterrupt:
         log("\nInterrupted.")
         return 130
+    except OSError as error:
+        log("")
+        log(f"Stopped: {error}")
+        return 1
 
 
 if __name__ == "__main__":

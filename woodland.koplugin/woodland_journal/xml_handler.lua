@@ -245,6 +245,10 @@ local function simpleTreeHandler()
             error("XML Error - Unmatched Tag ["..s..":"..t.."]\n")
         end
         if prev == self.root then
+            -- Woodland: a document has one top-level element. A second one
+            -- would reduce the whole tree again on every close (quadratic).
+            if self.reduced then error("XML Error - More than one top-level element") end
+            self.reduced = true
             -- Once parsing complete recursively reduce tree
             self:reduce(prev,nil,nil)
         end

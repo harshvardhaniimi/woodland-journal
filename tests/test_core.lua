@@ -103,6 +103,11 @@ check("tall cover fits by height", fh == 900 and fw == 592)
 fw, fh = Store.fitWithin(2000, 1000, 600, 900)
 check("wide cover fits by width", fw == 600 and fh == 300)
 check("small cover left alone", Store.fitWithin(318, 475, 600, 900) == nil and Store.fitWithin(nil, 10, 600, 900) == nil)
+-- A tiny file can claim an enormous image; decoding it would exhaust memory.
+check("ordinary covers decodable", Store.decodable(1875, 2850) and Store.decodable(318, 475))
+check("huge or unknown sizes refused", not Store.decodable(30000, 30000) and not Store.decodable(9000, 100)
+    and not Store.decodable(nil, 10) and not Store.decodable(0, 10))
+check("PNG claiming 30000 x 30000 refused", not Store.decodable(Store.imageSize("\137PNG\r\n\26\n" .. be32(13) .. "IHDR" .. be32(30000) .. be32(30000) .. "\8\2\0\0\0")))
 
 -- Feed parsing: entities, HTML, invalid ids, missing fields, Devanagari.
 local books = Store.parse(read(root .. "/tests/fixtures/shelf.xml"))
@@ -120,6 +125,84 @@ check("review and rating", middlemarch.rating == 5 and middlemarch.review:find("
 check("Devanagari kept", godan.title == "गोदान" and godan.description == "होरी और धनिया की कथा।")
 check("entity declarations refused", not pcall(Store.parse, '<!DOCTYPE x [<!ENTITY a "b">]><rss/>'))
 check("non-RSS refused", not pcall(Store.parse, "<html>Blocked</html>"))
+
+-- A hostile feed cannot store huge fields or endless items, or make parsing slow.
+local function item(id, title, cover)
+    return "<item><book_id>" .. id .. "</book_id><title><![CDATA[" .. title .. "]]></title>"
+        .. "<book_large_image_url><![CDATA[" .. cover .. "]]></book_large_image_url></item>"
+end
+local function feed(items) return "<rss><channel>" .. table.concat(items) .. "</channel></rss>" end
+books = Store.parse(feed{ item(1, string.rep("é", 5000), "https://i.gr-assets.com/images/1.jpg"),
+    item("12345678901234", "Long id", "https://i.gr-assets.com/images/2.jpg"),
+    item(3, "Elsewhere", "https://example.com/3.jpg"), item(4, "Header\r\nX: y", "https://i.gr-assets.com/a b.jpg") })
+check("title capped", #books[1].title <= 303 and books[1].title:sub(-3) == "…")
+check("long ids dropped", #books == 3 and books[2].id == "3")
+check("covers only from Goodreads' image hosts", books[2].image_url == "" and books[3].image_url == "")
+local many = {}
+for i = 1, 250 do many[i] = item(i, "Book", "https://i.gr-assets.com/images/x.jpg") end
+check("items per page capped", #Store.parse(feed(many)) == Store.PAGE_MAX_ITEMS)
+check("one top-level element", not pcall(Store.parse, feed{} .. "<rss></rss>"))
+check("too many tags refused", not pcall(Store.parse, "<rss>" .. string.rep("<a/>", Store.FEED_MAX_TAGS) .. "</rss>"))
+check("oversized feed refused", not pcall(Store.parse, "<rss>" .. string.rep(" ", Store.FEED_MAX_BYTES) .. "</rss>"))
+local tops = {}
+for i = 1, 8000 do tops[i] = "<e" .. i .. ">x</e" .. i .. ">" end
+local started = os.clock()
+check("many top-level elements refused at once", not pcall(Store.parse, table.concat(tops)) and os.clock() - started < 0.2)
+
+-- Network rules: only the feed and cover addresses, certificates that name the
+-- host, redirects only to those addresses, and a size limit.
+local FEED = "https://www.goodreads.com/review/list_rss/12345678?shelf=read&per_page=200&page=1"
+local COVER = "https://i.gr-assets.com/images/S/books/1l/1._SY475_.jpg"
+check("feed and cover addresses allowed", Store.allowedUrl(FEED) and Store.allowedUrl(COVER)
+    and Store.allowedUrl("https://images.gr-assets.com/books/1/1.jpg"))
+for _, url in ipairs{ "http://i.gr-assets.com/x.jpg", "https://i.gr-assets.com.example.com/x.jpg", "https://i.gr-assets.com@example.com/x.jpg",
+        "https://example.com/?https://i.gr-assets.com/", "https://www.goodreads.com/user/show/1", "https://www.goodreads.com/review/list_rss/x?",
+        "file:///etc/passwd", "" } do
+    check("address refused: " .. url, not Store.allowedUrl(url))
+end
+check("certificate names", Store.hostMatches("*.gr-assets.com", "i.gr-assets.com") and Store.hostMatches("www.goodreads.com", "WWW.Goodreads.com")
+    and not Store.hostMatches("*.gr-assets.com", "gr-assets.com") and not Store.hostMatches("*.gr-assets.com", "a.b.gr-assets.com")
+    and not Store.hostMatches("goodreads.com", "www.goodreads.com") and not Store.hostMatches("*.example.com", "i.gr-assets.com"))
+local function cert(names) return { extensions = function() return { ["2.5.29.17"] = { dNSName = names } } end } end
+check("certificate must name the host", Store.certificateMatches(cert{ "*.gr-assets.com" }, "i.gr-assets.com")
+    and not Store.certificateMatches(cert{ "*.example.com" }, "i.gr-assets.com")
+    and not Store.certificateMatches({ extensions = function() return {} end }, "i.gr-assets.com")
+    and not Store.certificateMatches({ extensions = function() error("bad certificate") end }, "i.gr-assets.com"))
+
+-- The refresh's requests against a scripted server.
+local script, requested = {}, {}
+-- Installed directly: LuaTeX's LuaJIT has a real LuaSocket of its own.
+package.loaded["socket.http"] = { request = function(req)
+    requested[#requested + 1] = req.url
+    local r = table.remove(script, 1)
+    local ok, err = req.sink(r.body)
+    if not ok then return nil, err end
+    req.sink(nil)
+    return 1, r.code, r.headers or {}
+end }
+package.loaded["ssl.https"] = { tcp = function() return function() end end }
+package.loaded["socketutil"] = { USER_AGENT = "test", set_timeout = function() end, reset_timeout = function() end }
+package.loaded["socket.url"] = { absolute = function(_, location) return location end }
+local function fetch(responses, url, limit)
+    script, requested = responses, {}
+    return pcall(Store.request, url, limit or 1000)
+end
+local ok, body = fetch({ { code = 200, body = "feed" } }, FEED)
+check("direct response", ok and body == "feed" and #requested == 1)
+ok, body = fetch({ { code = 302, headers = { location = COVER } }, { code = 200, body = "jpeg" } }, COVER)
+check("redirect to a cover address followed", ok and body == "jpeg" and requested[2] == COVER)
+ok = fetch({ { code = 302, headers = { location = "https://example.com/x.jpg" } }, { code = 200, body = "x" } }, COVER)
+check("redirect elsewhere refused", not ok and #requested == 1)
+local loop = {}
+for i = 1, 6 do loop[i] = { code = 301, headers = { location = COVER } } end
+ok = fetch(loop, COVER)
+check("redirect loop stops", not ok and #requested <= 4)
+ok = fetch({ { code = 200, body = string.rep("x", 2000) } }, COVER, 1000)
+check("size limit", not ok)
+ok = fetch({ { code = 404, body = "" } }, COVER)
+check("error status refused", not ok)
+ok = fetch({ { code = 200, body = "x" } }, "https://example.com/x.jpg")
+check("other addresses never requested", not ok and #requested == 0)
 
 -- Goodreads pages fit at several screen shapes.
 local GScene = require("woodland_journal/goodreads_scene")
@@ -188,6 +271,13 @@ store.simpleui_layout = { pages = { { id=1, modules={ "woodland_journal" } } } }
 check("removing the last module keeps one page", Layout.remove("woodland_journal") and #store.simpleui_layout.pages == 1)
 store.simpleui_layout = { pages = { { id=1, modules={} } } }
 check("empty home screen replaced", Layout.placeOnOwnPage("woodland_journal", false) and #store.simpleui_layout.pages == 1)
+-- A layout of an unknown shape is never written to.
+for _, odd in ipairs{ { pages = { { id=1 } } }, { pages = { "clock" } }, { pages = "x" }, "x" } do
+    store.simpleui_layout, store.simpleui_hs_module_order = odd, nil
+    check("odd layout left alone", not Layout.placeAfter("woodland_goodreads", "woodland_journal")
+        and not Layout.placeOnOwnPage("woodland_journal", true) and not Layout.remove("woodland_journal")
+        and store.simpleui_layout == odd and store.simpleui_hs_module_order == nil)
+end
 
 print(string.format("%s core: %d checks, %d failures", failures == 0 and "PASS" or "FAIL", n, failures))
 os.exit(failures == 0 and 0 or 1)

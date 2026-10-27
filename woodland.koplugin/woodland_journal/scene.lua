@@ -119,8 +119,9 @@ function M.build(data, translate, aspect)
         }
         local meta = {}
         if book.finished_on then meta[#meta+1] = string.format(_("Finished %s"), book.finished_on) end
-        if tonumber(book.pages) and book.pages > 0 then
-            meta[#meta+1] = Model.plural(math.floor(book.pages), _("%d page"), _("%d pages"))
+        local pages = tonumber(book.pages)
+        if pages and pages > 0 then
+            meta[#meta+1] = Model.plural(math.floor(pages), _("%d page"), _("%d pages"))
         end
         if #meta > 0 then
             blocks[#blocks+1] = { text=table.concat(meta, ", "), font="ui", size=19,
@@ -143,12 +144,13 @@ function M.build(data, translate, aspect)
             { text=(book.authors or ""):gsub("\n", ", "), font="ui", size=24, max_lines=2, gap=6 },
         }
         local meta = {}
-        if tonumber(book.pages) and book.pages > 0 then
-            meta[#meta+1] = Model.plural(math.floor(book.pages), _("%d page"), _("%d pages"))
+        local pages = tonumber(book.pages)
+        if pages and pages > 0 then
+            meta[#meta+1] = Model.plural(math.floor(pages), _("%d page"), _("%d pages"))
         end
-        local left = tonumber(book.avg_time) and tonumber(book.pages)
-            and Model.duration(book.avg_time * book.pages * (1 - book.percent))
-        if left and book.percent < 1 then meta[#meta+1] = string.format(_("about %s left"), left) end
+        local avg, percent = tonumber(book.avg_time), tonumber(book.percent) or 0
+        local left = avg and pages and Model.duration(avg * pages * (1 - percent))
+        if left and percent < 1 then meta[#meta+1] = string.format(_("about %s left"), left) end
         if #meta > 0 then
             blocks[#blocks+1] = { text=table.concat(meta, ", "), font="ui", size=19,
                 color="ink2", max_lines=1, gap=8, optional=true }

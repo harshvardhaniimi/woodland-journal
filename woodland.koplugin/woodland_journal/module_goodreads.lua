@@ -129,6 +129,8 @@ function M.build(width,ctx)
             if not tostring(id):match("^%d+$") then return nil end
             local path=Store.directory().."/covers/"..id..".jpg"
             if not require("libs/libkoreader-lfs").attributes(path) then return nil end
+            -- Never decode a file claiming an enormous (or unknown) size.
+            if not Store.coverIsSafe(path) then return nil end
             -- Covers saved before the downscaler existed are shrunk once here.
             pcall(Store.shrinkCover,path)
             -- Uncached: a cover decoding larger than KOReader's 8 MiB image cache

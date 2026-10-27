@@ -42,13 +42,22 @@ local function defaultLayout(Registry)
     return { pages=pages }
 end
 
--- The saved layout, or SimpleUI's default one when none is saved yet.
+local function wellFormed(layout)
+    if type(layout) ~= "table" or type(layout.pages) ~= "table" then return false end
+    for _i, page in ipairs(layout.pages) do
+        if type(page) ~= "table" or type(page.modules) ~= "table" then return false end
+    end
+    return true
+end
+
+-- The saved layout, or SimpleUI's default one when none is saved yet. A saved
+-- layout of a shape this code does not know is left alone (nil).
 function M.layout()
     local S = store()
     if not S then return nil end
     local layout = S:readSetting(LAYOUT_KEY)
-    if type(layout) == "table" and type(layout.pages) == "table" then return layout, S end
-    return defaultLayout(registry()), S
+    if layout == nil then return defaultLayout(registry()), S end
+    if wellFormed(layout) then return layout, S end
 end
 
 -- 1-based home page holding mod_id, or nil.

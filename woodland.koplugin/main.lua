@@ -151,8 +151,9 @@ function Woodland:addToMainMenu(menu_items)
                 help_text = _("Takes Woodland's pages out of SimpleUI's home screen. Do this before uninstalling, so no empty pages are left behind."),
                 callback = function()
                     local Layout = require("woodland_journal/layout")
-                    local removed = Layout.remove(GOODREADS)
-                    removed = Layout.remove(JOURNAL) or removed
+                    local ok1, gone1 = pcall(Layout.remove, GOODREADS)
+                    local ok2, gone2 = pcall(Layout.remove, JOURNAL)
+                    local removed = (ok1 and gone1) or (ok2 and gone2)
                     UIManager:show(require("ui/widget/infomessage"):new{ timeout=5, text = removed
                         and _("Woodland Journal's pages were removed from the home screen. Set up Woodland Journal puts them back.")
                         or _("Woodland Journal is not on the home screen.") })

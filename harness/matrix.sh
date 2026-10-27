@@ -11,7 +11,7 @@ SUMMARY="$OUT/summary.txt"
 : > "$SUMMARY"
 for DEVICE in $(awk 'NR > 1 { print $1 }' "$HERE/devices.tsv"); do
     SANDBOX="$OUT/sandbox-$DEVICE"
-    sh "$HERE/setup_sandbox.sh" "$BACKUP" "$SANDBOX" > /dev/null
+    sh "$HERE/setup_sandbox.sh" "$BACKUP" "$SANDBOX" > /dev/null || exit 1
     # Goodreads first: turning it off later removes its page from the layout.
     for PLAN in ${PROFILE:+plan_goodreads_pages} plan_scenarios plan_no_goodreads; do
         RUN="$OUT/$DEVICE/$PLAN"

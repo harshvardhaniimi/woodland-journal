@@ -12,6 +12,12 @@ M.DEFAULT_SHELVES = {
 -- about 460 x 690 pixels, and a 1875 x 2850 cover decodes to more than
 -- KOReader's 8 MiB image cache allows.
 M.COVER_MAX_W, M.COVER_MAX_H = 600, 900
+-- What one refresh may take in. A hostile or broken feed must not be able to
+-- freeze the home screen or fill the Kobo: a page of the feed, its tags and
+-- items, each stored field, each cover, all covers together, and the free
+-- space a refresh leaves on the Kobo.
+M.FEED_MAX_BYTES, M.FEED_MAX_TAGS, M.PAGE_MAX_ITEMS = 4*1024*1024, 100000, 200
+M.COVER_MAX_BYTES, M.COVERS_MAX_BYTES, M.KEEP_FREE_BYTES = 4*1024*1024, 300*1024*1024, 200*1024*1024
 local function json() return require("dkjson") end
 function M.directory()
     return require("datastorage"):getSettingsDir().."/simpleui/woodland-goodreads"
@@ -57,6 +63,13 @@ function M.imageSize(data)
         end
     end
 end
+-- Whether an image of w x h pixels is safe to decode. A small file can claim
+-- an enormous size, and decoding it would exhaust the reader's memory; real
+-- Goodreads covers stay far below these limits.
+M.DECODE_MAX_SIDE, M.DECODE_MAX_PIXELS = 6000, 12000000
+function M.decodable(w,h)
+    return (w and h and w>0 and h>0 and w<=M.DECODE_MAX_SIDE and h<=M.DECODE_MAX_SIDE and w*h<=M.DECODE_MAX_PIXELS) and true or false
+end
 -- Size that fits w x h inside max_w x max_h keeping the aspect ratio; nil
 -- when it already fits (or the size is unknown).
 function M.fitWithin(w,h,max_w,max_h)
@@ -64,14 +77,9 @@ function M.fitWithin(w,h,max_w,max_h)
     local scale=math.min(max_w/w,max_h/h)
     return math.max(1,math.floor(w*scale+0.5)),math.max(1,math.floor(h*scale+0.5))
 end
--- Re-save a cover larger than COVER_MAX as a smaller JPEG (PNG for greyscale
--- images) in place. True when the file changed. Each path is checked once a
--- session.
-local checked={}
-function M.shrinkCover(path)
-    if checked[path] then return false end
-    checked[path]=true
-    local f=io.open(path,"rb");if not f then return false end
+-- Pixel size of an image file; nil when unknown.
+function M.fileImageSize(path)
+    local f=io.open(path,"rb");if not f then return nil end
     local head=f:read(65536)
     local w,h=M.imageSize(head)
     -- Colour profiles can push a JPEG's size marker far into the file.
@@ -80,12 +88,31 @@ function M.shrinkCover(path)
         w,h=M.imageSize(head..(rest or ""))
     end
     f:close()
+    return w,h
+end
+-- Whether a saved cover may be drawn; checked once a session per path.
+local safe={}
+function M.coverIsSafe(path)
+    if safe[path]==nil then safe[path]=M.decodable(M.fileImageSize(path)) end
+    return safe[path]
+end
+-- Re-save a cover larger than COVER_MAX as a smaller JPEG (PNG for greyscale
+-- images) in place. True when the file changed. Each path is checked once a
+-- session.
+local checked={}
+function M.shrinkCover(path)
+    if checked[path] then return false end
+    checked[path]=true
+    local w,h=M.fileImageSize(path)
+    if not M.decodable(w,h) then return false end
     local tw,th=M.fitWithin(w,h,M.COVER_MAX_W,M.COVER_MAX_H)
+    -- A cover of normal size can still carry megabytes of other data.
+    if not tw and (require("libs/libkoreader-lfs").attributes(path,"size") or 0)>1024*1024 then tw,th=w,h end
     if not tw then return false end
     local RenderImage=require("ui/renderimage")
     local bb=RenderImage:renderImageFile(path,false)
     if not bb then return false end
-    local small=RenderImage:scaleBlitBuffer(bb,tw,th)
+    local small=RenderImage:scaleBlitBuffer(bb,tw,th,true)
     local temp=path..".small.part"
     local function written() local s=read(temp);return s and #s>0 end
     pcall(small.writeToFile,small,temp,"jpg",85)
@@ -119,17 +146,19 @@ function M.plain(s)
     return (s:gsub("^%s+",""):gsub("%s+$",""))
 end
 -- Cap stored text without splitting a UTF-8 character.
-local function cut(s)
-    if #s<=6000 then return s end
-    return (s:sub(1,6000):gsub("[\192-\255][\128-\191]*$","")).."…"
+local function cut(s,limit)
+    limit=limit or 6000
+    if #s<=limit then return s end
+    return (s:sub(1,limit):gsub("[\192-\255][\128-\191]*$","")).."…"
 end
 -- "Wed, 23 Sep 2026 23:23:03 -0700" -> "23 Sep 2026"
 local function day(v)
-    local d,m,y=text(v):match("(%d+) (%a+) (%d%d%d%d)")
+    local d,m,y=text(v):sub(1,64):match("(%d+) (%a+) (%d%d%d%d)")
     return d and (tonumber(d).." "..m.." "..y) or nil
 end
 function M.parse(xml)
-    assert(type(xml)=="string" and not xml:find("<!ENTITY",1,true),"Unsupported RSS document")
+    assert(type(xml)=="string" and #xml<=M.FEED_MAX_BYTES and not xml:find("<!ENTITY",1,true),"Unsupported RSS document")
+    assert(select(2,xml:gsub("<",""))<=M.FEED_MAX_TAGS,"Unsupported RSS document")
     local h=require("woodland_journal/xml_handler").simpleTreeHandler()
     require("woodland_journal/xml").xmlParser(h):parse(xml:gsub("^\239\187\191",""))
     local channel=h.root and h.root.rss and h.root.rss.channel
@@ -138,15 +167,18 @@ function M.parse(xml)
     if items.book_id then items={items} end
     local books={}
     for _,it in ipairs(items) do
+        if #books>=M.PAGE_MAX_ITEMS then break end
         local id=text(it.book_id)
-        if id:match("^%d+$") then
+        if id:match("^%d+$") and #id<=12 then
             local cover=text(it.book_large_image_url)
             if cover=="" then cover=text(it.book_medium_image_url) end
             local book=type(it.book)=="table" and it.book or {}
             local rating=tonumber(text(it.user_rating))
-            books[#books+1]={id=id,title=text(it.title),author=text(it.author_name),
-                url=text(it.link),image_url=cover,
-                description=cut(M.plain(it.book_description)),review=cut(M.plain(it.user_review)),
+            local link=text(it.link)
+            books[#books+1]={id=id,title=cut(text(it.title),300),author=cut(text(it.author_name),300),
+                url=#link<=512 and link:match("^https://www%.goodreads%.com/[%w%-%._~/%%?=&]+$") or nil,
+                image_url=M.allowedUrl(cover) and cover or "",
+                description=cut(M.plain(cut(text(it.book_description),60000))),review=cut(M.plain(cut(text(it.user_review),60000))),
                 pages=tonumber(text(book.num_pages)),average=tonumber(text(it.average_rating)),
                 published=text(it.book_published):match("^%-?%d+$"),isbn=text(it.isbn):match("^[%dXx]+$"),
                 rating=rating and rating>0 and rating or nil,added=day(it.user_date_added),read_at=day(it.user_read_at)}
@@ -154,24 +186,79 @@ function M.parse(xml)
     end
     return books
 end
-local function request(url,maxbytes)
-    assert(url:match("^https://www%.goodreads%.com/review/list_rss/%d+%?")
-        or url:match("^https://[is]%.gr%-assets%.com/")
-        or url:match("^https://images%.gr%-assets%.com/"),"Unexpected feed or cover host")
-    local socketutil=require("socketutil")
-    local sink,total={},0
-    socketutil:set_timeout(10,25)
-    local ok,result,code=pcall(require("ssl.https").request,{
-        url=url,method="GET",verify="peer",cafile="data/ca-bundle.crt",
-        headers={ ["User-Agent"]=socketutil.USER_AGENT },
-        sink=function(chunk,err)
-            if chunk then total=total+#chunk;if total>maxbytes then return nil,"Response too large" end;sink[#sink+1]=chunk end
-            return 1
-        end,
-    })
-    socketutil:reset_timeout()
-    assert(ok and result and tonumber(code)==200,"Goodreads refresh failed; the saved shelf is unchanged")
-    return table.concat(sink)
+-- The only addresses the refresh fetches: a profile's shelf feed and covers.
+function M.allowedUrl(url)
+    return type(url)=="string" and #url<=512 and (url:match("^https://www%.goodreads%.com/review/list_rss/%d+%?[%w%-_=&]+$")
+        or url:match("^https://[is]%.gr%-assets%.com/[%w%-%._~/%%]+$")
+        or url:match("^https://images%.gr%-assets%.com/[%w%-%._~/%%]+$")) and true or false
+end
+-- A certificate name such as "*.gr-assets.com" (one leading wildcard label).
+function M.hostMatches(name,host)
+    name,host=tostring(name):lower(),tostring(host):lower()
+    if name==host then return true end
+    local rest=name:match("^%*%.(.+)$")
+    return rest~=nil and host:match("^[^%.]+%.(.+)$")==rest
+end
+function M.certificateMatches(cert,host)
+    local ok,ext=pcall(function() return cert:extensions() end)
+    local san=ok and type(ext)=="table" and ext["2.5.29.17"]
+    for _,name in ipairs(type(san)=="table" and type(san.dNSName)=="table" and san.dNSName or {}) do
+        if M.hostMatches(name,host) then return true end
+    end
+    return false
+end
+-- LuaSec verifies the certificate chain but not that the certificate names
+-- the host; this connection checks the name after the handshake.
+local function checkedConnection(params)
+    local create=require("ssl.https").tcp(params)
+    return function()
+        local conn=create()
+        local connect=conn.connect
+        function conn:connect(host,port)
+            local r,err=connect(self,host,port)
+            if not r then return r,err end
+            local cert=self.sock.getpeercertificate and self.sock:getpeercertificate()
+            if cert and M.certificateMatches(cert,host) then return r end
+            self.sock:close()
+            return nil,"The certificate is not for "..tostring(host)
+        end
+        return conn
+    end
+end
+-- GET an allowed address over checked HTTPS, at most maxbytes and about 30
+-- seconds, following up to three redirects that stay on allowed addresses.
+function M.request(url,maxbytes)
+    local http,socketutil=require("socket.http"),require("socketutil")
+    -- Through a proxy the certificate check would see the proxy, not Goodreads.
+    assert(not http.PROXY,"Goodreads refresh does not work through a proxy")
+    local create=checkedConnection{verify="peer",cafile="data/ca-bundle.crt"}
+    local deadline=os.time()+30
+    for _=1,4 do
+        assert(M.allowedUrl(url),"Unexpected feed or cover address")
+        local parts,total={},0
+        socketutil:set_timeout(10,30)
+        local ok,result,code,headers=pcall(http.request,{
+            url=url,method="GET",create=create,redirect=false,
+            headers={["User-Agent"]=socketutil.USER_AGENT},
+            sink=function(chunk)
+                if chunk then
+                    total=total+#chunk
+                    if total>maxbytes then return nil,"Response too large" end
+                    if os.time()>deadline then return nil,"Goodreads took too long" end
+                    parts[#parts+1]=chunk
+                end
+                return 1
+            end,
+        })
+        socketutil:reset_timeout()
+        code=tonumber(code)
+        if ok and result and code==200 then return table.concat(parts) end
+        local location=ok and result and (code==301 or code==302 or code==303 or code==307 or code==308)
+            and type(headers)=="table" and headers.location
+        if type(location)~="string" then break end
+        url=require("socket.url").absolute(url,location)
+    end
+    error("Goodreads refresh failed; the saved shelf is unchanged")
 end
 -- Returns a replacement shelf from a cancellable worker; never replaces the
 -- main snapshot until the worker completes and the UI accepts its result.
@@ -180,8 +267,8 @@ function M.fetchShelf(profile,id,label)
     assert(id:match("^[%w%-]+$"),"Invalid shelf")
     local books,seen={},{}
     for page=1,10 do
-        local batch=M.parse(request("https://www.goodreads.com/review/list_rss/"..profile
-            .."?shelf="..id.."&per_page=200&page="..page,12*1024*1024))
+        local batch=M.parse(M.request("https://www.goodreads.com/review/list_rss/"..profile
+            .."?shelf="..id.."&per_page=200&page="..page,M.FEED_MAX_BYTES))
         local added=0
         for _,b in ipairs(batch) do
             if not seen[b.id] then seen[b.id]=true;books[#books+1]=b;added=added+1 end
@@ -191,15 +278,28 @@ function M.fetchShelf(profile,id,label)
     end
     local dir=M.directory().."/covers"
     require("util").makePath(dir)
-    local missing=0
+    local lfs=require("libs/libkoreader-lfs")
+    -- Leftovers of a refresh that was cancelled mid-write.
+    for name in lfs.dir(dir) do
+        if name:match("^%d+%.jpg%.[%d%.a-z]*part$") then os.remove(dir.."/"..name) end
+    end
+    local missing,taken=0,0
     for _,b in ipairs(books) do
         local path=dir.."/"..b.id..".jpg"
-        if not read(path) then
-            local ok,body=pcall(request,b.image_url,3*1024*1024)
-            if ok and (body:sub(1,2)=="\255\216" or body:sub(1,4)=="\137PNG") then
+        if (lfs.attributes(path,"size") or 0)==0 then
+            local free=require("util").diskUsage(dir).available
+            local ok,body=false,nil
+            if taken<M.COVERS_MAX_BYTES and (not free or free>M.KEEP_FREE_BYTES) then
+                ok,body=pcall(M.request,b.image_url,M.COVER_MAX_BYTES)
+            end
+            if ok and (body:sub(1,2)=="\255\216" or body:sub(1,4)=="\137PNG") and M.decodable(M.imageSize(body)) then
+                taken=taken+#body
                 local temp=path.."."..os.time()..".part"
-                local f=assert(io.open(temp,"wb"));f:write(body);f:close();assert(os.rename(temp,path))
-                pcall(M.shrinkCover,path)
+                local f=io.open(temp,"wb")
+                local written=f and f:write(body)
+                if f then f:close() end
+                if written and os.rename(temp,path) then pcall(M.shrinkCover,path)
+                else os.remove(temp);missing=missing+1 end
             else missing=missing+1 end
         end
     end

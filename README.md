@@ -33,7 +33,7 @@ Nothing is sent anywhere unless you add a Goodreads profile and tap Refresh on W
 ## What you need
 
 1. A Kobo with **KOReader** installed. If you do not have it yet, follow KOReader's own [installation guide for Kobo](https://github.com/koreader/koreader/wiki/Installation-on-Kobo-devices) first.
-2. **SimpleUI** installed in KOReader ([releases](https://github.com/doctorhetfield-cmd/simpleui.koplugin/releases/latest)).
+2. **SimpleUI** installed in KOReader ([releases](https://github.com/doctorhetfield-cmd/simpleui.koplugin/releases); 2.7.5 is the tested version).
 3. A computer with Python 3.8 or later for the installer.
 4. Optionally, **SimpleUI Extra** ([repository](https://github.com/omer-faruq/simpleui_ext.koplugin)) to show the dashboard as your sleep screen.
 
@@ -71,15 +71,16 @@ python3 install.py install    # backs up the whole Kobo, asks a few questions, i
 `check` prints a read-only disk check for your computer (on a Mac, `sudo fsck_msdos -n /dev/rdiskN`); run it before installing and again afterwards.
 The installer:
 
-- copies everything on the Kobo to `~/KoboBackups/<date-time>/` first and checks every file it copied;
+- copies everything on the Kobo to `~/KoboBackups/<date-time>/` first and checks every file it copied (it will not skip this unless you confirm at the prompt);
 - adds only `woodland.koplugin` to KOReader's plugins, plus the Alegreya fonts if they are missing and you agree;
 - asks before adding the optional English–Hindi dictionary, when a download includes it; your current dictionaries stay as they are;
 - moves Woodland Journal 0.1 out of SimpleUI Extra if you have it (the new plugin needs that), keeping it in the backup folder;
 - never changes your books, Kobo's own database or Kobo settings.
 
 Eject the Kobo before unplugging it.
-To undo, use **Tools → Woodland Journal → Remove from home screen** on the Kobo, then `python3 install.py uninstall`.
-To go back completely, copy the backup's `kobo/` folder back onto the Kobo.
+To undo, use **Tools → Woodland Journal → Remove from home screen** on the Kobo, then `python3 install.py uninstall`, which also asks for the disk check first.
+To get a file back, copy it from the backup's `kobo/` folder.
+Never copy the backup's `kobo/.kobo/` folder back as a whole: it holds the Kobo's own database, and an older copy makes the Kobo reset itself and can delete books.
 
 ### First start
 
@@ -90,8 +91,10 @@ You can run it again from **Tools → Woodland Journal → Set up Woodland Journ
 
 Woodland Journal reads KOReader's own reading statistics, history and book metadata on the device.
 It writes only its settings (in KOReader's settings, under `simpleui_woodland_*`), its Goodreads snapshot (`settings/simpleui/woodland-goodreads/`) and, when you accept during setup, the placement of its own pages in SimpleUI's home-screen layout.
-The only network access is the Goodreads refresh you start yourself: it fetches your shelf's public RSS feed from `www.goodreads.com` and cover images from Goodreads' image hosts, over verified HTTPS, with size limits.
+The only network access is the Goodreads refresh you start yourself: it fetches your shelf's public RSS feed from `www.goodreads.com` and cover images from Goodreads' image hosts, and nothing else.
+It uses HTTPS whose certificate must name the Goodreads host, follows no redirects to other addresses, does not run through a proxy, and limits how much it downloads and stores.
 No password or account is involved, and your profile must be public.
+`SECURITY.md` describes what Woodland Journal and its installer defend against, and how to report a problem.
 
 ## Development
 

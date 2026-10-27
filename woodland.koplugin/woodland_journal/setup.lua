@@ -61,9 +61,9 @@ local function placement(on_done)
     local function after()
         -- Goodreads gets its own page after the dashboard, and only when on.
         if Settings.goodreadsEnabled() then
-            Layout.placeAfter(GOODREADS, JOURNAL)
+            pcall(Layout.placeAfter, GOODREADS, JOURNAL)
         else
-            Layout.remove(GOODREADS)
+            pcall(Layout.remove, GOODREADS)
         end
         finish(on_done)
         UIManager:show(InfoMessage:new{ timeout=6, text=_("Woodland Journal is ready.") .. "\n\n"
@@ -76,7 +76,7 @@ local function placement(on_done)
     local function choose(first)
         return function()
             UIManager:close(dialog)
-            if first ~= nil then Layout.placeOnOwnPage(JOURNAL, first) end
+            if first ~= nil then pcall(Layout.placeOnOwnPage, JOURNAL, first) end
             after()
         end
     end

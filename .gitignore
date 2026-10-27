@@ -13,3 +13,4 @@ settings.reader.lua
 .DS_Store
 ._*
 *.swp
+__pycache__/
